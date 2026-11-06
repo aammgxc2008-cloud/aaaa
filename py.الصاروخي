@@ -1,0 +1,238 @@
+# -*- coding: utf-8 -*-
+import asyncio
+import time
+print("STARTED")
+from telethon import TelegramClient, events
+from telethon.errors import FloodWaitError
+
+# ===== CONFIG =====
+api_id = 39178252
+api_hash = "a72cd1dafe03f0dd66c2c9d55f9fe863"
+phone = "+9647733979234"
+
+client = TelegramClient(
+    "architect_session",
+    api_id,
+    api_hash
+)
+
+# Настройки по умолчанию
+state = {
+    "enabled": False,
+    "target": None,
+    "msg_limit": 5,      
+    "delay_sec": 5.0,
+    "monitored": {}  # مفتاح المراقبة سيكون (chat_id, user_id) لتقييدها بالمكان المحدد فقط
+}
+
+# ===== CONTROL COMMANDS =====
+@client.on(events.NewMessage(outgoing=True))
+async def handler(event):
+    text = (event.raw_text or "").strip()
+    lower_text = text.lower()
+
+    # Включить бесконечный повтор пересылки  
+    if lower_text == ".on":  
+        state["enabled"] = True  
+        state["target"] = event.chat_id  
+        print(f"Повтор включен в чате: {event.chat_id}")  
+        await event.delete()  
+
+    # Выключить повтор  
+    elif lower_text == ".off":  
+        state["enabled"] = False  
+        print("Повтор выключен")  
+        await event.delete()  
+
+    # Изменить лимит сообщений  
+    elif text.startswith(".limit "):  
+        try:  
+            new_limit = int(text.split(".limit ")[1].strip())
+            if new_limit > 0:
+                state["msg_limit"] = new_limit  
+                reply = await event.respond(f"⚙️ Лимит сообщений изменен на: {new_limit}")  
+                await asyncio.sleep(2)  
+                await asyncio.gather(event.delete(), reply.delete())  
+        except ValueError:  
+            pass  
+
+    # Изменить задержку  
+    elif text.startswith(".delay "):  
+        try:  
+            new_delay = float(text.split(".delay ")[1].strip())
+            state["delay_sec"] = new_delay  
+            reply = await event.respond(f"⚙️ Время задержки изменено на: {new_delay} сек.")  
+            await asyncio.sleep(2)  
+            await asyncio.gather(event.delete(), reply.delete())  
+        except ValueError:  
+            pass
+
+    # أمر بدء المراقبة (بالرد على العضو في هذا المكان المحدد فقط)
+    elif text in [".مراقبة", ".المراقبة"]:
+        reply = await event.get_reply_message()
+        if reply:
+            user_id = reply.sender_id
+            chat_id = event.chat_id
+            monitoring_key = (chat_id, user_id)
+            try:
+                user_obj = await client.get_entity(user_id)
+                username = f"@{user_obj.username}" if getattr(user_obj, 'username', None) else (user_obj.first_name or "مجهول")
+                
+                chat = await event.get_chat()
+                if getattr(chat, 'username', None):
+                    link = f"https://t.me/{chat.username}/{reply.id}"
+                else:
+                    chat_id_str = str(chat_id).replace("-100", "")
+                    link = f"https://t.me/c/{chat_id_str}/{reply.id}"
+                    
+                state["monitored"][monitoring_key] = {
+                    "username": username,
+                    "chat_id": chat_id,
+                    "user_id": user_id,
+                    "last_seen": time.time(),
+                    "last_link": link,
+                    "alerted": False
+                }
+                r = await event.respond(f"👁️ تم بدء مراقبة العضو ({username}) في هذه الدردشة فقط.")
+                await asyncio.sleep(2)
+                await asyncio.gather(event.delete(), r.delete())
+            except Exception as e:
+                print("خطأ بالمراقبة:", e)
+                r = await event.respond("❌ حدث خطأ أثناء تفعيل المراقبة.")
+                await asyncio.sleep(2)
+                await asyncio.gather(event.delete(), r.delete())
+        else:
+            r = await event.respond("⚠️ يجب الرد على العضو لمراقبته في هذا المكان")
+            await asyncio.sleep(2)
+            await asyncio.gather(event.delete(), r.delete())
+
+    # أمر إلغاء المراقبة في هذا المكان
+    elif text in [".الغاء مراقبة", ".الغاء المراقبة"]:
+        reply = await event.get_reply_message()
+        if reply:
+            user_id = reply.sender_id
+            chat_id = event.chat_id
+            monitoring_key = (chat_id, user_id)
+            if monitoring_key in state["monitored"]:
+                del state["monitored"][monitoring_key]
+                r = await event.respond("❌ تم إلغاء المراقبة لهذا العضو في هذه الدردشة.")
+                await asyncio.sleep(2)
+                await asyncio.gather(event.delete(), r.delete())
+            else:
+                r = await event.respond("⚠️ هذا العضو ليس مراقباً في هذه الدردشة.")
+                await asyncio.sleep(2)
+                await asyncio.gather(event.delete(), r.delete())
+        else:
+            r = await event.respond("⚠️ يجب الرد على العضو لإلغاء مراقبته")
+            await asyncio.sleep(2)
+            await asyncio.gather(event.delete(), r.delete())
+
+# ===== تحديث وقت ظهور المراقبين تلقائياً (في نفس الدردشة فقط) =====
+@client.on(events.NewMessage(incoming=True))
+async def incoming_handler(event):
+    sender = event.sender_id
+    chat_id = event.chat_id
+    monitoring_key = (chat_id, sender)
+    
+    if monitoring_key in state["monitored"]:
+        chat = await event.get_chat()
+        if getattr(chat, 'username', None):
+            link = f"https://t.me/{chat.username}/{event.id}"
+        else:
+            chat_id_str = str(chat_id).replace("-100", "")
+            link = f"https://t.me/c/{chat_id_str}/{event.id}"
+            
+        state["monitored"][monitoring_key]["last_seen"] = time.time()
+        state["monitored"][monitoring_key]["last_link"] = link
+        state["monitored"][monitoring_key]["alerted"] = False
+
+# ===== حلقة فحص المراقبين (تُرسل للمحفوظات me عند اختفاء الشخص 3 دقائق) =====
+async def monitor_check_loop():
+    while True:
+        await asyncio.sleep(5)
+        now = time.time()
+        for monitoring_key, m_data in list(state["monitored"].items()):
+            # تنبيه إذا اختفى الشخص لمدة 3 دقائق (180 ثانية) في هذه الدردشة تحديداً
+            if not m_data["alerted"] and (now - m_data["last_seen"] >= 180):
+                m_data["alerted"] = True
+                try:
+                    alert_msg = (
+                        f"⚠️ تنبيه اختفاء!\n\n"
+                        f"👤 المستخدم المراقب: {m_data['user_id']}\n"
+                        f"💬 في الدردشة: `{m_data['chat_id']}`\n"
+                        f"⏱️ اختفى منذ أكثر من 3 دقائق.\n"
+                        f"🔗 رابط آخر رسالة له: {m_data['last_link']}"
+                    )
+                    await client.send_message("me", alert_msg)
+                except Exception as e:
+                    print("خطأ بإرسال التنبيه:", e)
+
+# ===== MAIN LOOP =====
+async def spam_loop():
+    while True:
+        if state["enabled"] and state["target"]:
+            try:
+                # جلب عدد كافٍ من المحفوظات للفلترة
+                raw_messages = await client.get_messages(
+                    "me",
+                    limit=100
+                )
+
+                # 🛑 الفلتر الذكي: استبعاد الأوامر واختفاء رسائل المراقبة تماماً
+                valid = []
+                for m in raw_messages:
+                    m_text = m.raw_text or ""
+                    # 1. استبعاد الأوامر التي تبدأ بـ .
+                    if m_text.startswith("."):
+                        continue
+                    # 2. استبعاد رسائل تنبيه المراقبة حتى لا تخرب الليمت أو الكليشة
+                    if "تنبيه اختفاء" in m_text or "المستخدم المراقب:" in m_text:
+                        continue
+                    valid.append(m)
+
+                # اقتطاع العدد المحدد بالضبط بواسطة .limit
+                target_messages = valid[:state["msg_limit"]]
+
+                if target_messages:  
+                    await client.forward_messages(  
+                        state["target"],  
+                        list(reversed(target_messages))  
+                    )  
+                    print(f"Сообщения ({len(target_messages)}) пересланы в чат {state['target']}. Ожидание...")  
+
+                # Задержка перед следующим кругом пересылки  
+                current_delay = state["delay_sec"]  
+                await asyncio.sleep(  
+                    current_delay if current_delay > 0 else 0.5  
+                )  
+
+            except FloodWaitError as e:  
+                print(f"Защита Telegram: Ожидание {e.seconds} сек.")  
+                await asyncio.sleep(e.seconds)  
+
+            except Exception as err:  
+                print("Ошибка во время работы:", err)  
+                await asyncio.sleep(1)  
+        else:  
+            await asyncio.sleep(0.5)
+
+# ===== START =====
+async def main():
+    await client.start(phone=phone)
+    print("Бот успешно запущен. Отправьте .on для старта.")
+    
+    client.loop.create_task(spam_loop())  
+    client.loop.create_task(monitor_check_loop())
+    await client.run_until_disconnected()
+
+if __name__ == "__main__":
+    import sys
+    try:
+        loop = asyncio.get_event_loop()
+        loop.run_until_complete(main())
+    except KeyboardInterrupt:
+        print("\nБот остановлен.")
+    except Exception as server_err:
+        print(f"Server Error: {server_err}")
+        sys.exit(1)
+        
